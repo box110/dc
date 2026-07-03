@@ -1,0 +1,19 @@
+# --- Live game data (mutated every turn by the tools — not source) ---
+# state.json, session-log.jsonl, recap.md, lore/, and per-campaign config all
+# change constantly during play. Canonical characters/ ARE tracked (they change
+# only at creation / promote_boon and serve as reference fixtures).
+dnd-dm/campaigns/
+
+# Atomic-write temp files (temp file + os.replace)
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Stale / redundant artifacts (superseded by dnd-dm/tools/ and the extracted tree)
+/apply_event.py
+/dnd-dm.zip

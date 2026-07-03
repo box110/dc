@@ -1,0 +1,59 @@
+{
+  "id": "thordak",
+  "name": "Thordak",
+  "race": "Half-Orc",
+  "class": "Barbarian",
+  "level": 5,
+  "system": "5e",
+  "scores": {
+    "STR": 18,
+    "DEX": 14,
+    "CON": 16,
+    "INT": 8,
+    "WIS": 12,
+    "CHA": 10
+  },
+  "maxHp": 52,
+  "ac": 15,
+  "speed": 40,
+  "proficiencyBonus": 3,
+  "backstory": "Cast out of the Ashkeeper clan for refusing to burn a rival village. Carries the guilt as a slow-burning grudge against those who wield fire as cruelty.",
+  "signatureItems": [
+    {
+      "name": "Ashkeeper's Broken Chain",
+      "detail": "A length of clan-iron he never removes. Purely sentimental."
+    }
+  ],
+  "boons": [
+    {
+      "id": "boon_flametongue",
+      "type": "weapon",
+      "name": "Flametongue Greataxe",
+      "detail": "On command, erupts in flame for +2d6 fire damage on hit.",
+      "grantedBy": "campaign:emberdeep",
+      "grantedAt": "2026-05-18",
+      "slot": "weapon",
+      "replaces": null
+    },
+    {
+      "id": "boon_warmth",
+      "type": "item",
+      "name": "Ring of Warmth",
+      "detail": "Immunity to cold environmental damage; resistance to cold.",
+      "grantedBy": "campaign:frosthollow",
+      "grantedAt": "2026-06-02",
+      "slot": "ring",
+      "replaces": null
+    },
+    {
+      "id": "boon_mistystep",
+      "type": "spell",
+      "name": "Innate Misty Step",
+      "detail": "Cast Misty Step once per short rest without a spell slot.",
+      "grantedBy": "campaign:frosthollow",
+      "grantedAt": "2026-06-02",
+      "slot": "innate",
+      "replaces": null
+    }
+  ]
+}

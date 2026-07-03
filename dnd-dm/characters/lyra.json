@@ -1,0 +1,38 @@
+{
+  "id": "lyra",
+  "name": "Lyra Meadowlight",
+  "race": "Half-Elf",
+  "class": "Wizard",
+  "level": 5,
+  "system": "5e",
+  "scores": { "STR": 8, "DEX": 15, "CON": 13, "INT": 17, "WIS": 12, "CHA": 11 },
+  "maxHp": 27,
+  "ac": 12,
+  "speed": 30,
+  "proficiencyBonus": 3,
+  "spells": {
+    "ability": "INT",
+    "saveDC": 14,
+    "attackBonus": 6,
+    "cantrips": ["Fire Bolt", "Light", "Mage Hand", "Prestidigitation"],
+    "known": {
+      "1": ["Burning Hands", "Shield", "Magic Missile", "Detect Magic", "Comprehend Languages"],
+      "2": ["Scorching Ray", "Web", "Misty Step", "Detect Thoughts"],
+      "3": ["Fireball", "Counterspell", "Dispel Magic"]
+    }
+  },
+  "backstory": "A hedge-scholar chasing the fire-cult that razed her family's library. Studies flame to master it, not fear it.",
+  "signatureItems": [],
+  "boons": [
+    {
+      "id": "boon_cultsight",
+      "type": "item",
+      "name": "Cinder-Marked Sigil",
+      "detail": "Advantage on checks to recognize or recall fire-cult symbols, rites, and members.",
+      "grantedBy": "campaign:emberdeep",
+      "grantedAt": "2026-05-18",
+      "slot": "trinket",
+      "replaces": null
+    }
+  ]
+}

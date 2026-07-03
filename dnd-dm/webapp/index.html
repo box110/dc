@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en" class="dark-mode">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DM Engine — Dashboard</title>
+
+  <!-- PrimeIcons + our custom layout/theme CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/primeicons@7.0.0/primeicons.css" />
+  <link rel="stylesheet" href="/style.css" />
+
+  <!-- No build step: Vue 3 + PrimeVue 4 as ES modules via esm.sh (resolves transitive deps).
+       esm.sh/vue's esm-browser build includes the template compiler so we can use string templates. -->
+  <!-- ?external=vue forces every PrimeVue module to import THIS app's Vue (via the
+       import map) instead of bundling its own — otherwise PrimeVue runs on a second
+       Vue instance and component internals come back null. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "vue": "https://esm.sh/vue@3.5.13/dist/vue.esm-browser.js",
+      "primevue/config": "https://esm.sh/primevue@4.2.5/config?external=vue",
+      "primevue/select": "https://esm.sh/primevue@4.2.5/select?external=vue",
+      "primevue/panel": "https://esm.sh/primevue@4.2.5/panel?external=vue",
+      "primevue/card": "https://esm.sh/primevue@4.2.5/card?external=vue",
+      "primevue/tag": "https://esm.sh/primevue@4.2.5/tag?external=vue",
+      "primevue/progressbar": "https://esm.sh/primevue@4.2.5/progressbar?external=vue",
+      "primevue/chip": "https://esm.sh/primevue@4.2.5/chip?external=vue",
+      "primevue/datatable": "https://esm.sh/primevue@4.2.5/datatable?external=vue",
+      "primevue/column": "https://esm.sh/primevue@4.2.5/column?external=vue",
+      "primevue/tooltip": "https://esm.sh/primevue@4.2.5/tooltip?external=vue",
+      "@primevue/themes": "https://esm.sh/@primevue/themes@4.2.5?external=vue",
+      "@primevue/themes/aura": "https://esm.sh/@primevue/themes@4.2.5/aura?external=vue"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <p class="loading" id="boot-msg">Loading dashboard&hellip;</p>
+  </div>
+
+  <!-- If the ES modules fail to load (offline / CDN blocked), say so instead of hanging. -->
+  <script>
+    window.__vueMounted = false;
+    setTimeout(function () {
+      if (!window.__vueMounted) {
+        var el = document.getElementById("boot-msg");
+        if (el) el.innerHTML =
+          "Couldn't load the Vue/PrimeVue modules from the CDN. " +
+          "This build needs internet access for the CDN. " +
+          "(The vanilla version is backed up if you want to revert.)";
+      }
+    }, 6000);
+  </script>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
