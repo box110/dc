@@ -57,6 +57,22 @@ def log_path(cid):
     return os.path.join(campaign_dir(cid), "session-log.jsonl")
 
 
+def dialog_path(cid):
+    return os.path.join(campaign_dir(cid), "dialog.jsonl")
+
+
+def prompt_path(cid):
+    return os.path.join(campaign_dir(cid), "prompt.json")
+
+
+def input_path(cid):
+    return os.path.join(campaign_dir(cid), "player_input.jsonl")
+
+
+def rolls_path(cid):
+    return os.path.join(campaign_dir(cid), "rolls.jsonl")
+
+
 def character_path(char_id):
     return os.path.join(CHARACTERS_DIR, f"{char_id}.json")
 

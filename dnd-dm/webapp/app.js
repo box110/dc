@@ -1,6 +1,6 @@
 // Data-driven dashboard: a reactive store the poll updates; Vue + PrimeVue
 // render from it. No manual DOM manipulation. Read-only — never writes state.
-import { createApp, reactive, computed } from "vue";
+import { createApp, reactive, computed, watch, nextTick } from "vue";
 import PrimeVue from "primevue/config";
 import Aura from "@primevue/themes/aura";
 import Select from "primevue/select";
@@ -40,10 +40,210 @@ const SPELL_DESC = {
 const S = reactive({
   campaigns: [],
   cid: null,
-  bundle: null,   // {campaign, state, characters, recap}
+  bundle: null,   // {campaign, state, characters, recap, dialog}
   selectedChar: null,
   live: "connecting",
+  leftPct: Number(localStorage.getItem("dm-split")) || 50,  // story-pane width %
+  audioOn: localStorage.getItem("dm-audio") === "1",         // remembered across reloads
+  speechRate: Number(localStorage.getItem("dm-rate")) || 1,  // global TTS speed multiplier
+  speakingId: null,                                          // id of the line being read aloud
+  ttsPaused: false,                                          // narration paused (spacebar)
+  draft: "",                                                 // player compose box
+  sending: false,
+  thinking: false,                                           // DM is composing a response
+  thinkSince: 0,
+  quip: "",
+  roll: null,                                                // the roll being shown (structured)
+  rollFace: 0,                                               // number on the die (cycles while spinning)
+  rolling: false,
+  rollLanded: false,
+  diceOpen: localStorage.getItem("dm-dice-open") !== "0",    // dice tile expanded (default yes)
+  diceMuted: localStorage.getItem("dm-dice-mute") === "1",   // dice roll sound off
 });
+
+// ---------- dice roll sound (Web Audio: hollow tumble across a tabletop) ----------
+const DiceSound = {
+  ctx: null, delay: null, feedback: null, wet: null,
+  muted: localStorage.getItem("dm-dice-mute") === "1",
+  ensure() {
+    if (this.ctx) return this.ctx;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    const ctx = this.ctx = new AC();
+    // reverb/delay module (fast room echo)
+    const delay = this.delay = ctx.createDelay(1.0);
+    const feedback = this.feedback = ctx.createGain();
+    const wet = this.wet = ctx.createGain();
+    delay.delayTime.value = 0.045;
+    feedback.gain.value = 0.45;
+    wet.gain.value = 0.25;
+    delay.connect(feedback); feedback.connect(delay);
+    delay.connect(wet); wet.connect(ctx.destination);
+    return ctx;
+  },
+  unlock() { const c = this.ensure(); if (c && c.state === "suspended") c.resume(); },
+  _hit(time, volume, pitch) {
+    const ctx = this.ctx;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const filt = ctx.createBiquadFilter();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(pitch, time);
+    osc.frequency.linearRampToValueAtTime(pitch * 0.7, time + 0.04);
+    filt.type = "bandpass";
+    filt.frequency.setValueAtTime(pitch, time);
+    filt.Q.value = 5;
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(volume, time + 0.003);
+    gain.gain.exponentialRampToValueAtTime(0.001, time + 0.045);
+    osc.connect(filt); filt.connect(gain);
+    gain.connect(ctx.destination);  // raw clear sound
+    gain.connect(this.delay);       // + into the echo room
+    osc.start(time); osc.stop(time + 0.05);
+  },
+  roll() {
+    if (this.muted) return;
+    const ctx = this.ensure();
+    if (!ctx) return;
+    if (ctx.state === "suspended") ctx.resume();
+    const now = ctx.currentTime;
+    const seq = [[0, .35, 420], [.06, .25, 460], [.15, .30, 410], [.26, .20, 390],
+                 [.35, .15, 440], [.42, .10, 400], [.47, .06, 420], [.51, .03, 415]];
+    for (const [t, v, p] of seq) this._hit(now + t, v, p);
+  },
+};
+
+// ---------- dice: animate the newest roll as a suspenseful spinning die ----------
+const DICE = {
+  lastId: 0,
+  primed: false,
+  spin: null,
+  hideT: null,
+  animate(roll) {
+    clearTimeout(this.spin);
+    DiceSound.roll();   // hollow tumble
+    const sides = roll.sides || 20;
+    S.roll = roll; S.rolling = true; S.rollLanded = false;
+    S.rollFace = 1 + Math.floor(Math.random() * sides);
+    // spin: cycle random faces, decelerating for suspense
+    let t = 0;
+    const step = () => {
+      S.rollFace = 1 + Math.floor(Math.random() * sides);
+      t += 1;
+      const delay = 45 + t * t * 1.6;           // slows down as it "settles"
+      if (t < 20) this.spin = setTimeout(step, delay);
+      else this.land(roll);
+    };
+    this.spin = setTimeout(step, 45);
+  },
+  land(roll) {
+    clearTimeout(this.spin); this.spin = null;
+    S.rollFace = (roll.count === 1) ? roll.kept : roll.total;  // die shows the natural face / total
+    S.rolling = false; S.rollLanded = true;
+    // no auto-hide — the die persists showing the last result in the tile
+  },
+  check(rolls) {
+    if (!rolls || !rolls.length) return;
+    const newest = rolls[rolls.length - 1];
+    if (!this.primed) {
+      // on load: show the latest roll statically (no spin) so die + history are populated
+      this.lastId = newest.id; this.primed = true;
+      S.roll = newest; S.rolling = false; S.rollLanded = true;
+      S.rollFace = newest.count === 1 ? newest.kept : newest.total;
+      return;
+    }
+    if (newest.id > this.lastId) { this.lastId = newest.id; this.animate(newest); }
+  },
+};
+
+// "the DM is thinking" flavor quips
+const QUIPS = [
+  "The DM consults the ancient tomes…",
+  "Rolling the dice behind the screen…",
+  "Summoning the next encounter…",
+  "Thumbing through the Monster Manual…",
+  "The dungeon shifts around you…",
+  "Bribing the dice gods…",
+  "Unfurling the battle map…",
+  "Whispering to the NPCs…",
+  "Checking the corridor for traps…",
+  "The candles gutter as fate is decided…",
+  "Consulting the alignment chart…",
+  "Rerolling a natural 1…",
+  "Feeding the owlbear…",
+  "Sharpening the plot hooks…",
+  "Aligning the planes…",
+  "The tavern goes quiet…",
+];
+let quipTimer = null, thinkTimeout = null;
+function pickQuip() { S.quip = QUIPS[Math.floor(Math.random() * QUIPS.length)]; }
+function startThinking(sinceId) {
+  S.thinkSince = sinceId;
+  S.thinking = true;
+  pickQuip();
+  clearInterval(quipTimer); quipTimer = setInterval(pickQuip, 2800);
+  clearTimeout(thinkTimeout); thinkTimeout = setTimeout(stopThinking, 90000); // safety net
+}
+function stopThinking() {
+  S.thinking = false;
+  clearInterval(quipTimer); quipTimer = null;
+  clearTimeout(thinkTimeout); thinkTimeout = null;
+}
+
+// ---------- victory fireworks (fires when a battle ends in a win) ----------
+let prevCombatActive = false;
+function launchFireworks() {
+  if (typeof document === "undefined") return;
+  const canvas = document.createElement("canvas");
+  canvas.className = "fx-canvas";
+  document.body.appendChild(canvas);
+  const ctx = canvas.getContext("2d");
+  const size = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; };
+  size();
+  window.addEventListener("resize", size);
+  const COLORS = ["#f0a95a", "#d9b661", "#b7abf0", "#7fb069", "#cf5b48", "#f0c9c0", "#ffffff"];
+  const parts = [];
+  const burst = (x, y) => {
+    const n = 60 + Math.floor(Math.random() * 45);
+    const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+    for (let i = 0; i < n; i++) {
+      const a = (Math.PI * 2) * (i / n), sp = 2 + Math.random() * 4.5;
+      parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1, color, r: 1.4 + Math.random() * 1.8 });
+    }
+  };
+  let launched = 0;
+  const spawn = setInterval(() => {
+    burst(canvas.width * (0.12 + Math.random() * 0.76), canvas.height * (0.12 + Math.random() * 0.45));
+    if (++launched >= 16) clearInterval(spawn);
+  }, 240);
+  let raf, start = null;
+  const frame = (t) => {
+    if (start === null) start = t;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const p = parts[i];
+      p.vy += 0.055; p.vx *= 0.99; p.vy *= 0.99;
+      p.x += p.vx; p.y += p.vy; p.life -= 0.012;
+      if (p.life <= 0) { parts.splice(i, 1); continue; }
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    if (t - start < 5200 || parts.length) { raf = requestAnimationFrame(frame); }
+    else { cancelAnimationFrame(raf); window.removeEventListener("resize", size); canvas.remove(); }
+  };
+  raf = requestAnimationFrame(frame);
+  setTimeout(() => { clearInterval(spawn); if (canvas.parentNode) { window.removeEventListener("resize", size); canvas.remove(); } }, 9000);
+
+  const banner = document.createElement("div");
+  banner.className = "fx-banner";
+  banner.textContent = "⚔  VICTORY  ⚔";
+  document.body.appendChild(banner);
+  setTimeout(() => banner.classList.add("show"), 40);
+  setTimeout(() => banner.classList.remove("show"), 3200);
+  setTimeout(() => banner.remove(), 3800);
+}
 
 let pollTimer = null;
 
@@ -58,6 +258,27 @@ async function tick() {
     const data = await fetchJSON("/api/data/" + encodeURIComponent(S.cid));
     S.bundle = data;
     S.live = "live";
+    // fireworks when a battle just ended in a win (combat true -> false, party alive)
+    const combatActive = !!(data.state && data.state.combat && data.state.combat.active);
+    if (prevCombatActive && !combatActive) {
+      const ps = (data.state && data.state.participations) || {};
+      if (Object.values(ps).some((p) => p.hp > 0)) launchFireworks();
+    }
+    prevCombatActive = combatActive;
+    DICE.check(data.rolls || []);   // animate the newest roll
+    const dl = data.dialog || [];
+    // the DM has "answered" once a non-player line appears past the send point
+    if (S.thinking && dl.some((l) => l.id > S.thinkSince && l.type !== "player")) {
+      stopThinking();
+    }
+    if (!TTS.primed) {
+      // first load (incl. a remembered audioOn=true): mark everything already
+      // seen so we only speak lines that arrive from here on — never the backlog.
+      TTS.lastSpokenId = dl.reduce((m, l) => Math.max(m, l.id), 0);
+      TTS.primed = true;
+    } else if (S.audioOn) {
+      TTS.speakNew(dl);
+    }
   } catch (e) {
     S.live = "offline";
   }
@@ -99,6 +320,148 @@ function miniMarkdown(md) {
     const m = b.match(/^#{1,6}\s+(.*)$/);
     return m ? "<h2>" + inline(esc(m[1])) + "</h2>" : "<p>" + inline(esc(b.replace(/\n/g, " "))) + "</p>";
   }).join("");
+}
+
+// ---------- speaker identity (voice + color, consistent per actor) ----------
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+// Curated voice-name preferences for the main cast (best-effort across OSes;
+// falls back to a deterministic hash when a named voice isn't present).
+const VOICE_PREFS = {
+  Narrator: ["Daniel", "Arthur", "Serena", "Google UK English Male"],
+  DM: ["Daniel", "Arthur"],
+  Thordak: ["Rocko", "Reed", "Fred", "Ralph", "Google UK English Male"],
+  Lyra: ["Samantha", "Karen", "Moira", "Tessa", "Google US English"],
+  Sella: ["Moira", "Tessa", "Fiona", "Veena"],
+};
+const BOSS_VOICES = ["Grandpa", "Bad News", "Rocko", "Fred", "Ralph", "Reed"];
+const SPEAKER_COLORS = {
+  Narrator: "#cdbfa6", DM: "#cdbfa6",
+  Thordak: "#f0a95a", Lyra: "#b7abf0", Sella: "#7fb069",
+};
+
+const TTS = {
+  voices: [],
+  lastSpokenId: 0,
+  primed: false,   // set once the initial backlog is marked seen
+  assign: {},   // speaker -> { voice, pitch, rate }
+  supported: typeof window !== "undefined" && "speechSynthesis" in window,
+
+  loadVoices() {
+    if (this.supported) this.voices = window.speechSynthesis.getVoices() || [];
+  },
+  _pickVoice(speaker, type) {
+    if (!this.voices.length) return null;
+    const prefs = VOICE_PREFS[speaker] || (type === "boss" ? BOSS_VOICES : null);
+    if (prefs) {
+      for (const p of prefs) {
+        const v = this.voices.find((v) => v.name.includes(p));
+        if (v) return v;
+      }
+    }
+    const en = this.voices.filter((v) => /^en(-|_|$)/i.test(v.lang));
+    const pool = en.length ? en : this.voices;
+    return pool[hashStr(speaker) % pool.length];
+  },
+  _prosody(speaker, type) {
+    if (speaker === "Thordak") return { pitch: 0.6, rate: 0.95 };
+    if (speaker === "Lyra") return { pitch: 1.2, rate: 1.03 };
+    if (type === "boss") return { pitch: 0.65, rate: 0.9 };
+    if (type === "narrator") return { pitch: 1.0, rate: 1.0 };
+    const h = hashStr(speaker);
+    return { pitch: 0.8 + (h % 45) / 100, rate: 0.92 + (h % 22) / 100 };
+  },
+  assignFor(speaker, type) {
+    if (!this.assign[speaker]) {
+      this.assign[speaker] = { voice: this._pickVoice(speaker, type), ...this._prosody(speaker, type) };
+    }
+    return this.assign[speaker];
+  },
+  // --- one-at-a-time queue: speak a line, and when it ENDS, start the next ---
+  queue: [],
+  active: false,
+  currentId: null,
+  _utter(line) {
+    const a = this.assignFor(line.speaker || "Narrator", line.type || "narrator");
+    const u = new SpeechSynthesisUtterance(line.text);
+    if (a.voice) u.voice = a.voice;
+    u.pitch = a.pitch;
+    // per-speaker base rate scaled by the user's global speed multiplier
+    u.rate = Math.max(0.1, Math.min(10, a.rate * (S.speechRate || 1)));
+    u.onstart = () => {
+      S.speakingId = line.id;   // drives the glow
+      S.ttsPaused = false;
+      const el = document.querySelector('[data-line-id="' + line.id + '"]');
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    };
+    return u;
+  },
+  _drain() {
+    if (this.active || !this.queue.length || !this.supported) return;
+    const line = this.queue.shift();
+    this.active = true;
+    this.currentId = line.id;
+    const advance = () => {
+      if (this.currentId !== line.id) return;   // stale (was cancelled/replaced)
+      this.active = false;
+      this.currentId = null;
+      if (S.speakingId === line.id) S.speakingId = null;
+      this._drain();                            // section done -> move to the next
+    };
+    const u = this._utter(line);
+    u.onend = advance;
+    u.onerror = advance;
+    window.speechSynthesis.speak(u);
+  },
+  speakNew(dialog) {
+    for (const line of dialog) {
+      if (line.id > this.lastSpokenId) {
+        this.lastSpokenId = line.id;
+        if (line.type === "roll") continue;  // dice show in the feed but aren't read aloud
+        this.queue.push(line);
+      }
+    }
+    this._drain();
+  },
+  speakLine(line) {   // click-to-replay: interrupt and jump to this line now
+    if (!this.supported || !line || !line.text) return;
+    this.queue = [];
+    this.currentId = null;
+    this.active = false;
+    window.speechSynthesis.cancel();
+    this.queue.push(line);
+    this._drain();
+  },
+  stop() {
+    this.queue = [];
+    this.currentId = null;
+    this.active = false;
+    if (this.supported) window.speechSynthesis.cancel();
+    S.speakingId = null;
+    S.ttsPaused = false;
+  },
+  pauseToggle() {   // spacebar: pause / resume the current narration
+    if (!this.supported) return;
+    const ss = window.speechSynthesis;
+    if (ss.paused) { ss.resume(); S.ttsPaused = false; }
+    else if (ss.speaking) { ss.pause(); S.ttsPaused = true; }
+  },
+};
+if (TTS.supported) {
+  TTS.loadVoices();
+  window.speechSynthesis.onvoiceschanged = () => TTS.loadVoices();
+}
+
+function speakerColor(speaker, type) {
+  if (SPEAKER_COLORS[speaker]) return SPEAKER_COLORS[speaker];
+  if (type === "roll") return "#d9b661";
+  if (type === "player") return "#6fd0cf";
+  if (type === "boss") return "#cf5b48";
+  return "hsl(" + (hashStr(speaker) % 360) + ", 45%, 68%)";
 }
 
 // ---------- root component ----------
@@ -192,6 +555,123 @@ const App = {
     const spellDesc = (name) => SPELL_DESC[name] || "No description on file.";
     const cidModel = computed({ get: () => S.cid, set: (v) => selectCampaign(v) });
 
+    // ---- story feed + TTS + splitter ----
+    const dialog = computed(() => (S.bundle && S.bundle.dialog) || []);
+    const prompt = computed(() => (S.bundle && S.bundle.prompt) || null);
+    const rolls = computed(() => (S.bundle && S.bundle.rolls) || []);
+    const rollsReversed = computed(() => rolls.value.slice().reverse());  // newest first
+    watch(() => S.diceOpen, (v) => localStorage.setItem("dm-dice-open", v ? "1" : "0"));
+    function toggleDiceSound() {
+      DiceSound.unlock();
+      DiceSound.muted = !DiceSound.muted;
+      S.diceMuted = DiceSound.muted;
+      localStorage.setItem("dm-dice-mute", DiceSound.muted ? "1" : "0");
+      if (!DiceSound.muted) DiceSound.roll();   // audition on unmute (also unlocks audio)
+    }
+    const replayRoll = () => { DiceSound.unlock(); if (S.roll) DICE.animate(S.roll); };  // click die to replay + hear it
+
+    // clicking a suggestion toggles its text in the compose box:
+    // append if absent, remove if already there.
+    function addSuggestion(text) {
+      if (S.draft.includes(text)) {
+        S.draft = S.draft.replace(text, "").replace(/\s{2,}/g, " ").trim();
+      } else {
+        S.draft = (S.draft ? S.draft.replace(/\s+$/, "") + " " : "") + text;
+      }
+    }
+    // clicking a spell / weapon / item drops "<who> casts/attacks with/uses <name>" in the box
+    function appendAction(text) {
+      const cur = S.draft.replace(/[.\s]+$/, "");
+      S.draft = (cur ? cur + ". " : "") + text;
+    }
+    function useSpell(s) {
+      const who = sel.value && sel.value.char && sel.value.char.name;
+      appendAction((who ? who + " casts " : "Cast ") + s);
+    }
+    function useItem(it) {
+      const who = sel.value && sel.value.char && sel.value.char.name;
+      const verb = it.type === "weapon" ? "attacks with" : "uses";
+      appendAction((who ? who + " " + verb + " " : (it.type === "weapon" ? "Attack with " : "Use ")) + it.name);
+    }
+    function useReward(r) {
+      const who = sel.value && sel.value.char && sel.value.char.name;
+      const name = typeof r === "string" ? r : (r.name || "reward");
+      appendAction((who ? who + " uses the " : "Use the ") + name);
+    }
+    async function sendInput() {
+      const text = S.draft.trim();
+      if (!text || S.sending) return;
+      S.sending = true;
+      const maxId = ((S.bundle && S.bundle.dialog) || []).reduce((m, l) => Math.max(m, l.id), 0);
+      try {
+        await fetch("/api/input/" + encodeURIComponent(S.cid), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        S.draft = "";
+        startThinking(maxId);  // show the DM-thinking hourglass until a reply lands
+        tick();  // pull the echoed line back immediately
+      } catch (e) {
+        /* leave draft in place so nothing is lost */
+      } finally {
+        S.sending = false;
+      }
+    }
+    function onComposeKey(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); sendInput(); }
+    }
+
+    // auto-scroll the story feed to the newest line
+    watch(() => dialog.value.length, () => nextTick(() => {
+      const el = document.querySelector(".story-feed");
+      if (el) el.scrollTop = el.scrollHeight;
+    }));
+
+    function toggleAudio() {
+      if (!TTS.supported) { alert("This browser has no speech synthesis."); return; }
+      if (S.audioOn) {
+        S.audioOn = false;
+        TTS.stop();
+      } else {
+        TTS.loadVoices();
+        // only auto-speak lines from here forward (don't dump the backlog)
+        TTS.lastSpokenId = dialog.value.reduce((m, l) => Math.max(m, l.id), 0);
+        S.audioOn = true;
+      }
+      localStorage.setItem("dm-audio", S.audioOn ? "1" : "0");
+    }
+    const replay = (line) => TTS.speakLine(line);
+    const stopSpeaking = () => TTS.stop();
+    const pauseToggle = () => TTS.pauseToggle();
+    const fmtTime = (ts) => {
+      try {
+        return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      } catch (e) { return ""; }
+    };
+    function setRate(e) {
+      S.speechRate = Number(e.target.value);
+      localStorage.setItem("dm-rate", String(S.speechRate));
+    }
+
+    function startDrag(e) {
+      e.preventDefault();
+      const root = document.querySelector(".split-root");
+      if (!root) return;
+      const move = (ev) => {
+        const rect = root.getBoundingClientRect();
+        let pct = ((ev.clientX - rect.left) / rect.width) * 100;
+        S.leftPct = Math.max(22, Math.min(78, pct));
+      };
+      const up = () => {
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", up);
+        localStorage.setItem("dm-split", String(Math.round(S.leftPct)));
+      };
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+    }
+
     return {
       S, ABILITIES: ["STR", "DEX", "CON", "INT", "WIS", "CHA"],
       campaign, subtitle, party, partyGold, sel, selectedId,
@@ -199,6 +679,9 @@ const App = {
       combat, combatRows, rewards, recapHtml,
       abilityMod, hpPct, hpClass, spellDesc, cidModel,
       selectChar: (id) => { S.selectedChar = id; },
+      dialog, speakerColor, toggleAudio, replay, stopSpeaking, pauseToggle, startDrag, setRate, fmtTime,
+      prompt, addSuggestion, sendInput, onComposeKey, useSpell, useItem, useReward,
+      rolls, rollsReversed, toggleDiceSound, replayRoll,
     };
   },
   template: `
@@ -219,6 +702,109 @@ const App = {
     </div>
   </header>
 
+  <div class="split-root">
+    <section class="story-pane" :style="{ flexBasis: S.leftPct + '%' }">
+      <div class="story-head">
+        <span class="pv-title">Story</span>
+        <div class="tts-controls">
+          <label class="rate-ctl" title="speech speed">
+            <span class="rate-ico">🐢</span>
+            <input type="range" min="0.5" max="1.8" step="0.1" :value="S.speechRate" @input="setRate" />
+            <span class="rate-ico">🐇</span>
+            <span class="rate-val">{{ S.speechRate.toFixed(1) }}×</span>
+          </label>
+          <button class="ttbtn" :class="{ on: S.audioOn }" @click="toggleAudio">{{ S.audioOn ? '🔊 narration on' : '🔈 enable narration' }}</button>
+          <button class="ttbtn" :class="{ on: S.ttsPaused }" @click="pauseToggle" title="spacebar">{{ S.ttsPaused ? '▶ resume' : '⏸ pause' }}</button>
+          <button class="ttbtn" @click="stopSpeaking">⏹ stop</button>
+        </div>
+      </div>
+      <div class="story-feed">
+        <div v-for="line in dialog" :key="line.id" class="dline"
+             :class="['sp-' + line.type, { speaking: line.id === S.speakingId }]"
+             :data-line-id="line.id" @click="replay(line)" title="click to hear this line">
+          <span class="dline-head">
+            <span class="speaker" :style="{ color: speakerColor(line.speaker, line.type) }">{{ line.speaker }}</span>
+            <span class="dtime" v-if="line.ts">{{ fmtTime(line.ts) }}</span>
+          </span>
+          <span class="dtext">{{ line.text }}</span>
+        </div>
+        <p v-if="!dialog.length" class="empty">The story appears here as it unfolds. Click “enable narration” to hear each new line, or click any line to replay it.</p>
+      </div>
+
+      <div class="compose">
+        <div class="thinking" v-if="S.thinking"><span class="hourglass">⏳</span><span>{{ S.quip }}</span></div>
+        <div class="prompt-text" v-if="prompt && prompt.text">{{ prompt.text }}</div>
+        <div class="suggestions" v-if="prompt && prompt.suggestions && prompt.suggestions.length">
+          <button v-for="(s, i) in prompt.suggestions" :key="i" class="sug" :class="{ on: S.draft.includes(s) }" @click="addSuggestion(s)">{{ S.draft.includes(s) ? '✓' : '＋' }} {{ s }}</button>
+        </div>
+        <textarea class="composebox" v-model="S.draft" @keydown="onComposeKey"
+                  placeholder="Type your action… (buttons append here) — Ctrl/⌘+Enter to send"></textarea>
+        <div class="compose-actions">
+          <span class="hint">Ctrl/⌘ + Enter to send</span>
+          <button class="sendbtn" :disabled="S.sending || !S.draft.trim()" @click="sendInput">{{ S.sending ? 'sending…' : 'Send ▸' }}</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="splitter" @mousedown="startDrag" title="drag to resize"></div>
+
+    <section class="dash-pane">
+      <div class="dice-panel" v-if="rolls.length">
+        <div class="dice-head" @click="S.diceOpen = !S.diceOpen">
+          <span class="pv-title">Dice</span>
+          <span class="dice-head-right">
+            <span class="dice-last" v-if="!S.diceOpen && S.roll">{{ S.roll.label }} → <b>{{ S.roll.total }}</b></span>
+            <button class="dice-mute" @click.stop="toggleDiceSound" :title="S.diceMuted ? 'roll sound off' : 'roll sound on'">{{ S.diceMuted ? '🔇' : '🔊' }}</button>
+            <span class="chev">{{ S.diceOpen ? '▾' : '▸' }}</span>
+          </span>
+        </div>
+        <div class="dice-body" v-show="S.diceOpen">
+          <div class="roll-history">
+            <div class="rh-row" v-for="r in rollsReversed" :key="r.id"
+                 :class="{ crit: r.crit, fumble: r.fumble, current: S.roll && r.id === S.roll.id }">
+              <span class="rh-mini" :class="'d' + r.sides">d{{ r.sides }}</span>
+              <span class="rh-label">{{ r.label }}<span v-if="r.adv" class="rh-adv">▲</span><span v-if="r.dis" class="rh-adv">▼</span></span>
+              <span class="rh-total">{{ r.total }}</span>
+              <span class="rh-verdict" v-if="r.vs != null" :class="r.hit ? 'v-hit' : 'v-miss'">{{ r.hit ? 'HIT' : 'MISS' }}</span>
+              <span class="rh-verdict muted" v-else>·</span>
+            </div>
+          </div>
+          <div class="dice-stage" v-if="S.roll">
+            <div class="dice-label">{{ S.roll.label }}</div>
+            <div class="die" @click="replayRoll" title="click to replay (and hear it)" :class="['d' + S.roll.sides, { rolling: S.rolling, landed: S.rollLanded, crit: S.rollLanded && S.roll.crit, fumble: S.rollLanded && S.roll.fumble, hit: S.rollLanded && S.roll.hit === true, miss: S.rollLanded && S.roll.hit === false }]">
+              <div class="die-shape"></div>
+              <span class="die-face">{{ S.rolling ? S.rollFace : (S.roll.count === 1 ? S.roll.kept : S.roll.total) }}</span>
+              <span class="die-kind">d{{ S.roll.sides }}<span v-if="S.roll.adv">▲</span><span v-if="S.roll.dis">▼</span></span>
+            </div>
+            <div class="dice-result" :class="{ show: S.rollLanded }">
+              <span class="dice-total">= {{ S.roll.total }}</span>
+              <span class="dice-math">{{ S.roll.notation }}<span v-if="S.roll.adv"> adv</span><span v-if="S.roll.dis"> dis</span></span>
+              <span class="dice-verdict" v-if="S.roll.vs != null">vs {{ S.roll.vs }} · <b :class="S.roll.hit ? 'v-hit' : 'v-miss'">{{ S.roll.hit ? 'HIT' : 'MISS' }}</b></span>
+              <span class="dice-tag t-crit" v-if="S.roll.crit">✦ CRIT!</span>
+              <span class="dice-tag t-fumble" v-if="S.roll.fumble">✖ NAT 1</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="combat-tile" :class="{ pinned: combat.active }" v-if="S.bundle">
+        <Panel>
+          <template #header><span class="pv-title">Combat</span>
+            <span class="pv-aux">{{ combat.active ? 'round ' + combat.round : 'no active encounter' }}</span>
+          </template>
+          <div v-if="combat.active" class="initfeed">
+            <div class="init-row" v-for="row in combatRows" :key="row.ord" :class="{ foe: row.foe }">
+              <span class="ord">{{ row.ord }}</span>
+              <span class="who2">
+                <span class="nm">{{ row.name }}<Tag v-if="!row.foe" value="party" severity="secondary" class="mini-tag" /></span>
+                <span class="chips" v-if="row.conditions.length"><Tag v-for="c in row.conditions" :key="c" severity="danger" :value="c" class="mini-tag" /></span>
+              </span>
+              <span class="mini-hp"><ProgressBar :value="row.pct" :showValue="false" :class="'hpbar ' + row.cls" style="height:8px" /></span>
+              <span class="hp-txt">{{ row.hp }}/{{ row.maxHp }}<span v-if="row.tempHp"> +{{ row.tempHp }}</span></span>
+            </div>
+          </div>
+          <p v-else class="empty">Out of combat. The initiative order appears here when the DM calls <code>start_combat</code>.</p>
+        </Panel>
+      </div>
   <main v-if="sel">
     <div class="col-main">
       <!-- Roster -->
@@ -280,11 +866,11 @@ const App = {
           <div class="section" v-if="sel.char.spells">
             <h4>Spells · save DC {{ sel.char.spells.saveDC }} · atk +{{ sel.char.spells.attackBonus }}</h4>
             <div class="spell-lv"><span class="lv-tag">cant</span>
-              <div class="spell-row"><Chip v-for="s in sel.char.spells.cantrips" :key="s" :label="s" v-tooltip.top="spellDesc(s)" class="spell" /></div>
+              <div class="spell-row"><Chip v-for="s in sel.char.spells.cantrips" :key="s" :label="s" v-tooltip.top="spellDesc(s) + ' — click to add to your action'" class="spell" @click="useSpell(s)" /></div>
             </div>
             <div class="spell-lv" v-for="(list, lv) in sel.char.spells.known" :key="lv">
               <span class="lv-tag">L{{ lv }}</span>
-              <div class="spell-row"><Chip v-for="s in list" :key="s" :label="s" v-tooltip.top="spellDesc(s)" class="spell" /></div>
+              <div class="spell-row"><Chip v-for="s in list" :key="s" :label="s" v-tooltip.top="spellDesc(s) + ' — click to add to your action'" class="spell" @click="useSpell(s)" /></div>
             </div>
           </div>
 
@@ -312,7 +898,7 @@ const App = {
           <div class="section"><h4>Inventory</h4>
             <div v-if="!(sel.part.inventory || []).length" class="empty">Empty.</div>
             <ul class="itemlist" v-else>
-              <li v-for="(it, idx) in sel.part.inventory" :key="idx">
+              <li v-for="(it, idx) in sel.part.inventory" :key="idx" class="clickable" @click="useItem(it)" :title="(it.type === 'weapon' ? 'attack with' : 'use') + ' — click to add to your action'">
                 <span class="iname">{{ it.name }}<span v-if="it.fromBoon" class="src"> ◆ boon</span><span v-if="it.detail" class="idetail">{{ it.detail }}</span></span>
                 <span class="q" v-if="it.qty">×{{ it.qty }}</span>
               </li>
@@ -323,29 +909,6 @@ const App = {
         </div>
       </Panel>
 
-      <!-- Combat -->
-      <Panel>
-        <template #header><span class="pv-title">Combat</span>
-          <span class="pv-aux">{{ combat.active ? 'round ' + combat.round : 'no active encounter' }}</span>
-        </template>
-        <DataTable v-if="combat.active" :value="combatRows" size="small" dataKey="ord">
-          <Column field="ord" header="#" style="width:2.5rem" />
-          <Column header="Combatant">
-            <template #body="{ data }">
-              <span :class="{ 'foe-name': data.foe }">{{ data.name }}</span>
-              <Tag v-if="!data.foe" value="party" severity="secondary" class="mini-tag" />
-              <span class="rowconds"><Tag v-for="c in data.conditions" :key="c" severity="danger" :value="c" class="mini-tag" /></span>
-            </template>
-          </Column>
-          <Column header="HP" style="width:38%">
-            <template #body="{ data }">
-              <ProgressBar :value="data.pct" :showValue="false" :class="'hpbar ' + data.cls" style="height:10px" />
-              <span class="hp-txt">{{ data.hp }}/{{ data.maxHp }}<span v-if="data.tempHp"> +{{ data.tempHp }}</span></span>
-            </template>
-          </Column>
-        </DataTable>
-        <p v-else class="empty">Out of combat. The initiative order appears here when the DM calls <code>start_combat</code>.</p>
-      </Panel>
     </div>
 
     <div class="col-aside">
@@ -387,7 +950,7 @@ const App = {
       <Panel v-if="rewards.length">
         <template #header><span class="pv-title">Local Rewards</span><span class="pv-aux">this campaign only</span></template>
         <ul style="margin:0;padding:0">
-          <li v-for="(r, i) in rewards" :key="i" class="rewards">◆ {{ typeof r === 'string' ? r : (r.name || 'reward') }}</li>
+          <li v-for="(r, i) in rewards" :key="i" class="rewards clickable" @click="useReward(r)" :title="(typeof r === 'string' ? '' : (r.detail || '')) + ' — click to add to your action'">◆ {{ typeof r === 'string' ? r : (r.name || 'reward') }}</li>
         </ul>
       </Panel>
 
@@ -398,8 +961,9 @@ const App = {
       </Panel>
     </div>
   </main>
-
   <p v-else class="loading">Loading campaign…</p>
+    </section>
+  </div>
 
   <footer class="foot">
     <span>Read-only dashboard · Vue + PrimeVue · the DM loop is the only writer.</span>
@@ -407,6 +971,22 @@ const App = {
   </footer>
   `,
 };
+
+// unlock Web Audio on user gestures (dice sound is blocked until the AudioContext
+// is resumed inside a gesture). Not once — resume() is idempotent, so retry on
+// every interaction in case the first didn't take.
+["pointerdown", "keydown", "touchstart", "click"].forEach((ev) =>
+  window.addEventListener(ev, () => DiceSound.unlock(), { passive: true }));
+
+// spacebar pauses / resumes narration (unless you're typing in the compose box)
+document.addEventListener("keydown", (e) => {
+  if (e.code !== "Space" && e.key !== " ") return;
+  const t = e.target;
+  const tag = t && t.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (t && t.isContentEditable)) return;
+  e.preventDefault();   // don't scroll the page
+  TTS.pauseToggle();
+});
 
 const app = createApp(App);
 app.use(PrimeVue, { theme: { preset: Aura, options: { darkModeSelector: ".dark-mode", cssLayer: false } } });

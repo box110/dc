@@ -13,3 +13,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Local Claude Code session state (scheduling lock, etc.)
+.claude/

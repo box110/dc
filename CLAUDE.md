@@ -20,9 +20,17 @@ compute it. You say "the Gutter King hits Thordak for 12"; the tool does
    other slices. Avoid `all` unless you truly need it.
 2. Read `recap.md` for the story so far. Read `lore/` only when narrative
    recall matters (query_lore).
-3. Narrate. Call for rolls. Let the human report rolls, or roll in-tool.
+3. Narrate by appending attributed lines with `say.py` — the web app renders
+   this on its **story pane** and reads new lines aloud (a distinct voice per
+   speaker). Give each speaker their own **in-voice** lines (Narrator for scene,
+   `pc`/`npc`/`boss` for speech); write more dialogue, not one big block. The
+   CLI chat is **control-only**: dice results, state changes, and a one-line
+   "your move?" prompt — not prose.
 4. For every mechanical change, call `apply_event.py <campaign> '<json>'`.
-5. Turn ends. State is on disk. Don't carry it forward in prose.
+5. End the turn by publishing the next prompt + suggestion buttons with
+   `prompt.py`. The player answers from the web app's compose box; read their
+   submission with `get_input.py` and play it out next turn.
+6. Turn ends. State is on disk. Don't carry it forward in prose.
 
 ## Tools
 
@@ -30,6 +38,9 @@ compute it. You say "the Gutter King hits Thordak for 12"; the tool does
 |------|---------|
 | `get_state.py <cid> [slice]` | Read a slice. Keep it small. |
 | `apply_event.py <cid> '<event>'` | The only mutator of live state. |
+| `say.py <cid> '<json>'` | Append story dialogue (line or array) to the web app's story feed. `{speaker,type,text}`; type = narrator/pc/npc/boss. |
+| `prompt.py <cid> '<json>'` | Publish the player-facing prompt + suggestion buttons to the web app. `{text, suggestions[]}`. |
+| `get_input.py <cid> [n]` | Read the player's responses submitted from the web app (the input queue). |
 | `complete_campaign.py <cid> '<lootbox>'` | Fires after the FINAL level boss. Generates loot candidates. |
 | `promote_boon.py <cid> <charId> '<boon>'` | The ONLY writer of canonical character files. |
 | `query_lore.py <cid> '<query>'` | Semantic recall over lore/ and the log. |

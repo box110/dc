@@ -81,11 +81,48 @@ def campaign_bundle(cid):
     if os.path.isfile(recap_path):
         with open(recap_path, "r", encoding="utf-8") as f:
             recap = f.read()
+    # Story feed: tail of the append-only dialogue log (narrative, not state).
+    dialog = []
+    dpath = common.dialog_path(cid)
+    if os.path.isfile(dpath):
+        with open(dpath, "r", encoding="utf-8") as f:
+            for ln in f.readlines()[-150:]:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    dialog.append(json.loads(ln))
+                except ValueError:
+                    pass
+    # Current player-facing prompt + suggested response buttons (DM-authored).
+    prompt = None
+    ppath = common.prompt_path(cid)
+    if os.path.isfile(ppath):
+        try:
+            prompt = common._read(ppath)
+        except (OSError, ValueError):
+            prompt = None
+    # Dice rolls (structured) — the web app animates the newest as a spinning die.
+    rolls = []
+    rpath = common.rolls_path(cid)
+    if os.path.isfile(rpath):
+        with open(rpath, "r", encoding="utf-8") as f:
+            for ln in f.readlines()[-25:]:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rolls.append(json.loads(ln))
+                except ValueError:
+                    pass
     return {
         "campaign": campaign,
         "state": state,
         "characters": characters,
         "recap": recap,
+        "dialog": dialog,
+        "prompt": prompt,
+        "rolls": rolls,
     }
 
 
@@ -141,6 +178,43 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, {"error": str(e)})
 
         self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        # The one write path (SPEC.md sec.10 player-input queue): the web app
+        # POSTs the player's composed response. We append it to the input queue
+        # (for the DM to read) and echo it into the story feed so it shows up.
+        path = self.path.split("?", 1)[0]
+        m = re.match(r"^/api/input/([^/]+)$", path)
+        if not m:
+            return self._send(404, {"error": "not found"})
+        cid = m.group(1)
+        if not CID_RE.match(cid) or not os.path.isfile(common.campaign_path(cid)):
+            return self._send(404, {"error": "unknown campaign"})
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length <= 0 or length > 8000:
+                return self._send(400, {"error": "empty or oversized body"})
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            text = (body.get("text") or "").strip()
+            if not text:
+                return self._send(400, {"error": "no text"})
+        except (ValueError, OSError) as e:
+            return self._send(400, {"error": str(e)})
+
+        ts = common.now_iso()
+        # 1) queue it for the DM
+        with open(common.input_path(cid), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": ts, "text": text}, ensure_ascii=False) + "\n")
+        # 2) echo it into the story feed (party voice) so the player sees it land
+        dpath = common.dialog_path(cid)
+        try:
+            with open(dpath, "r", encoding="utf-8") as f:
+                nid = sum(1 for _ in f) + 1
+        except FileNotFoundError:
+            nid = 1
+        with open(dpath, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": nid, "ts": ts, "speaker": "You", "type": "player", "text": text}, ensure_ascii=False) + "\n")
+        return self._send(200, {"ok": True})
 
 
 def main():

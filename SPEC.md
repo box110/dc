@@ -152,6 +152,7 @@ Every mutation appends to `session-log.jsonl`.
 |------|-----------|------|
 | `get_state.py` | `<cid> [slice]` | Read a slice: `scene` (default), `party`, `combat`, `position`, `bosses`, `all`. Keep reads small. |
 | `apply_event.py` | `<cid> '<event_json>'` | **Only** mutator of live state. Deterministic arithmetic + boss cascade. |
+| `say.py` | `<cid> '<json>'` | Append story dialogue (a line or an array) to `dialog.jsonl` — narrative, not state. `{speaker,type,text}`, type = narrator/pc/npc/boss. |
 | `complete_campaign.py` | `<cid> '<lootbox_json>'` | Fires after the final level boss. Writes `lootbox.json`, freezes campaign. |
 | `promote_boon.py` | `<cid> <charId> '<boon_json>'` | **Only** writer of canonical character files. Appends to `boons[]` with provenance. |
 | `query_lore.py` | `<cid> '<query>'` | Unstructured recall over `lore/` + log. Never for HP/positions. |
@@ -292,10 +293,25 @@ actually fell.
 
 ---
 
-## 9. Web app — TO BUILD
+## 9. Web app
 
-A **read-only** viewer onto the campaign files. It never writes; the DM loop is
-the only writer, which sidesteps almost all concurrency concerns.
+A viewer onto the campaign files, built as a data-driven Vue 3 + PrimeVue app
+(CDN, no build step) on a small Python stdlib server; it polls `state.json` (via
+`/api/data/<cid>`) and renders reactively. It is **read-only for game state** —
+the DM loop is the only writer of `state.json`/character files — but it does
+have one narrow write path: the **player-input queue** (§10 step 6, now built).
+
+**Two surfaces.** The web app is the **stage** — the story lives here. The left
+half is a **story pane** (draggable splitter, default 50/50) that renders the
+`dialog.jsonl` feed and reads new lines aloud via the browser SpeechSynthesis
+API, giving **each speaker a distinct, consistent voice** (curated for the main
+cast, deterministic hash otherwise; the line being spoken scrolls into view and
+glows). Below the feed is a **compose area**: the DM publishes the current
+prompt + suggestion buttons with `prompt.py`; clicking a button appends its text
+to a textarea; **Ctrl/⌘+Enter** POSTs to `/api/input/<cid>`, which appends to
+`player_input.jsonl` (the DM reads it with `get_input.py`) and echoes the line
+into the feed. The DM narrates via `say.py`; the CLI chat stays control-only.
+The right half is the dashboard.
 
 Requirements:
 

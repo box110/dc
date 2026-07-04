@@ -38,6 +38,20 @@ app polls `state.json` every 2s and re-renders reactively.
 
 Unknown campaign ids and path-traversal attempts return 404.
 
+## Layout: story pane + dashboard
+
+The window splits into a **story pane** (left) and the **dashboard** (right),
+with a **draggable splitter** (default 50/50, persisted to `localStorage`).
+
+- **Story pane** renders the campaign's `dialog.jsonl` feed (attributed lines
+  the DM writes with `tools/say.py`). Click **"enable narration"** (a browser
+  gesture is required before speech) and each new line is read aloud via the
+  **SpeechSynthesis API**, with a **distinct, consistent voice per speaker**
+  (curated preferences for the main cast — Narrator/Thordak/Lyra/Sella/bosses —
+  and a deterministic hash for everyone else; pitch/rate tuned per actor). A
+  **Stop** button halts speech; click any past line to replay it.
+- The **dashboard** (below/right) is everything else, unchanged.
+
 ## What's built
 
 - **Campaign switcher** (remembers your last pick in `localStorage`).

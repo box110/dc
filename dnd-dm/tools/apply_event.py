@@ -275,6 +275,10 @@ def apply(cid, event):
             "borough": event.get("borough"),
             "neighborhood": event.get("neighborhood"),
         }
+        # descending / moving into a freshly generated level resolves the
+        # "next floor awaits generation" flag the cascade set.
+        if "flags" in state:
+            state["flags"].pop("awaitingNextLevel", None)
 
     else:
         result = {"type": etype, "ok": False, "error": "unknown event type"}
